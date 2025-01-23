@@ -1,15 +1,12 @@
-version: "3.8"
 
 services:
-  app:
+  localization:
     build: .
-    container_name: color_detection_app
+    container_name: localization_app
     volumes:
-      - .:/app
-      - /tmp/.X11-unix:/tmp/.X11-unix  # Share the host's X11 socket
+      - .:/app  # Bind current folder to the container
     devices:
-      - "/dev/video0:/dev/video0"      # Give container access to the webcam
+      - "/dev/video0:/dev/video0"  # Give container access to the webcam
     environment:
-      - DISPLAY=$DISPLAY
-    network_mode: "host"
+      - PYTHONUNBUFFERED=1
     restart: unless-stopped

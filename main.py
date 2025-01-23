@@ -1,5 +1,6 @@
 import cv2
 import numpy as np
+import os
 
 # Initialize webcam
 cap = cv2.VideoCapture(0)
@@ -10,6 +11,10 @@ color_ranges = {
     "green": ((40, 40, 40), (80, 255, 255)),  # Lower and upper HSV bounds for green
     "blue": ((100, 150, 0), (140, 255, 255)),  # Lower and upper HSV bounds for blue
 }
+
+# Create output directory if not exists
+output_dir = "output_frames"
+os.makedirs(output_dir, exist_ok=True)
 
 # Function to detect color and return center positions
 def detect_color_positions(frame, color_ranges):
@@ -40,6 +45,7 @@ def detect_color_positions(frame, color_ranges):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     return positions
 
+frame_count = 0
 while True:
     ret, frame = cap.read()
     if not ret:
@@ -47,27 +53,17 @@ while True:
         break
 
     # Detect color positions
-    color_positions = detect_color_positions(frame, color_ranges)
+    detect_color_positions(frame, color_ranges)
 
-    # Display relative positions
-    if len(color_positions) > 1:
-        colors = list(color_positions.keys())
-        for i in range(len(colors)):
-            for j in range(i + 1, len(colors)):
-                color1, color2 = colors[i], colors[j]
-                x1, y1 = color_positions[color1]
-                x2, y2 = color_positions[color2]
-                rel_x, rel_y = x2 - x1, y2 - y1
-                print(f"{color2} relative to {color1}: ({rel_x}, {rel_y})")
+    # Save frame to the output directory
+    output_path = os.path.join(output_dir, f"frame_{frame_count:04d}.jpg")
+    cv2.imwrite(output_path, frame)
+    frame_count += 1
 
-    # Display the frame
-    cv2.imshow("Color-Based Localization", frame)
-
-    # Exit on pressing 'q'
-    if cv2.waitKey(1) & 0xFF == ord('q'):
+    # Exit after capturing a certain number of frames (e.g., 100)
+    if frame_count >= 100:
+        print(f"Captured {frame_count} frames, exiting.")
         break
 
 # Release resources
 cap.release()
-cv2.destroyAllWindows()
-    
