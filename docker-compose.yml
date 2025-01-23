@@ -1,0 +1,12 @@
+services:
+  app:
+    build: .
+    container_name: color-localization
+    volumes:
+      - .:/app
+    devices:
+      - "/dev/video0:/dev/video0"  # Give container access to the webcam
+    environment:
+      - DISPLAY=$DISPLAY
+    network_mode: "host"
+    restart: unless-stopped
