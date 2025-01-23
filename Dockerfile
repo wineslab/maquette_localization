@@ -18,4 +18,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set the entrypoint to the script
-ENTRYPOINT ["python", "app.py"]
+ENTRYPOINT ["python", "main.py"]
