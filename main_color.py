@@ -26,7 +26,7 @@ def detect_color_positions(frame, color_ranges):
         if contours:
             # Get the largest contour (assume it's the marker)
             c = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(c) > 500:  # Minimum area to avoid small noise
+            if cv2.contourArea(c) > 20:  # Minimum area to avoid small noise
                 # Calculate the center of the contour
                 M = cv2.moments(c)
                 if M["m00"] > 0:
