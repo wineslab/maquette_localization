@@ -1,11 +1,14 @@
+version: "3.8"
+
 services:
   app:
     build: .
-    container_name: color-localization
+    container_name: color_detection_app
     volumes:
       - .:/app
+      - /tmp/.X11-unix:/tmp/.X11-unix  # Share the host's X11 socket
     devices:
-      - "/dev/video0:/dev/video0"  # Give container access to the webcam
+      - "/dev/video0:/dev/video0"      # Give container access to the webcam
     environment:
       - DISPLAY=$DISPLAY
     network_mode: "host"

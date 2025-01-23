@@ -5,6 +5,8 @@ FROM python:3.9-slim
 RUN apt-get update && apt-get install -y \
     libgl1-mesa-glx \
     libglib2.0-0 \
+    libxkbcommon-x11-0 \
+    qt5-default \
     && rm -rf /var/lib/apt/lists/*
 
 # Set the working directory in the container
@@ -18,4 +20,4 @@ RUN pip install --no-cache-dir -r requirements.txt
 COPY . .
 
 # Set the entrypoint to the script
-ENTRYPOINT ["python", "main.py"]
+ENTRYPOINT ["python", "app.py"]
