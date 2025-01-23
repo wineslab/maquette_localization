@@ -1,9 +1,14 @@
+import logging
 import cv2
 import numpy as np
 import os
 
-# Initialize webcam
-cap = cv2.VideoCapture(0)
+
+BLUE_POS_CRS =  (42.34300258212629, -71.09793934723564)         # correspoding lat and lon to blue color
+GREEN_POS_CRS = (42.34442061309218, -71.08302794110213)         # correspoding lat and lon to green color
+GUI = True
+OUT_DIR = "out"
+os.makedirs(OUT_DIR, exist_ok=True)
 
 # Define color ranges in HSV (tweak these values based on your markers)
 color_ranges = {
@@ -12,12 +17,19 @@ color_ranges = {
     "blue": ((100, 150, 0), (140, 255, 255)),  # Lower and upper HSV bounds for blue
 }
 
-# Create output directory if not exists
-output_dir = "out"
-os.makedirs(output_dir, exist_ok=True)
-
-# Function to detect color and return center positions
 def detect_color_positions(frame, color_ranges):
+    """
+    Detects the positions of specified colors in a given frame.
+
+    Args:
+        frame (numpy.ndarray): The input image frame in BGR format.
+        color_ranges (dict): A dictionary where keys are color names (str) and values are tuples containing
+                             the lower and upper HSV bounds for the color (list of int).
+
+    Returns:
+        dict: A dictionary where keys are color names (str) and values are tuples containing the (x, y) positions
+              of the detected color centers in the frame.
+    """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)  # Convert frame to HSV
     positions = {}
 
@@ -45,25 +57,60 @@ def detect_color_positions(frame, color_ranges):
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     return positions
 
-frame_count = 0
-while True:
-    ret, frame = cap.read()
-    if not ret:
-        print("Failed to grab frame")
-        break
 
-    # Detect color positions
-    detect_color_positions(frame, color_ranges)
+def rlpos2latlon(blue_pos, green_pos, red_pos):
+    """
+    Calculate the relative position of the red marker based on the positions of the blue and green markers.
 
-    # Save frame to the output directory
-    output_path = os.path.join(output_dir, f"frame_{frame_count:04d}.jpg")
-    cv2.imwrite(output_path, frame)
-    frame_count += 1
+    Args:
+        blue_pos (tuple): The (x, y) position of the blue marker in the frame.
+        green_pos (tuple): The (x, y) position of the green marker in the frame.
+        red_pos (tuple): The (x, y) position of the red marker in the frame.
 
-    # Exit after capturing a certain number of frames (e.g., 100)
-    if frame_count >= 100:
-        print(f"Captured {frame_count} frames, exiting.")
-        break
+    Returns:
+        tuple: The (latitude, longitude) of the red marker.
+    """
+    # Calculate the relative distances in the frame
+    blue_to_green_x = green_pos[0] - blue_pos[0]
+    blue_to_green_y = green_pos[1] - blue_pos[1]
+    blue_to_red_x = red_pos[0] - blue_pos[0]
+    blue_to_red_y = red_pos[1] - blue_pos[1]
 
-# Release resources
-cap.release()
+    # Calculate the relative position in CRS
+    blue_to_green_lat = GREEN_POS_CRS[0] - BLUE_POS_CRS[0]
+    blue_to_green_lon = GREEN_POS_CRS[1] - BLUE_POS_CRS[1]
+
+    red_lat = BLUE_POS_CRS[0] + (blue_to_red_y / blue_to_green_y) * blue_to_green_lat if blue_to_green_y != 0 else BLUE_POS_CRS[0]
+    red_lon = BLUE_POS_CRS[1] + (blue_to_red_x / blue_to_green_x) * blue_to_green_lon if blue_to_green_x != 0 else BLUE_POS_CRS[1]
+
+    return red_lat, red_lon
+
+# Initialize webcam
+cap = cv2.VideoCapture(0)
+try:
+    while True:
+        ret, frame = cap.read()
+        if not ret:
+            print("Failed to grab frame")
+            break
+
+        # Detect color positions
+        positions = detect_color_positions(frame, color_ranges)
+
+        print(positions)
+
+        if "blue" in positions and "green" in positions and "red" in positions:
+            red_lat, red_lon = rlpos2latlon(positions["blue"], positions["green"], positions["red"])
+            print(red_lat, red_lon)
+
+        # Show the frame in a window if GUI is enabled
+        if GUI:
+            cv2.imshow("Frame", frame)
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+except Exception as e:
+    print(f"An error occurred: {e}")
+finally:
+    cap.release()
+    if GUI:
+        cv2.destroyAllWindows()
