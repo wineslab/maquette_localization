@@ -13,7 +13,7 @@ color_ranges = {
 }
 
 # Create output directory if not exists
-output_dir = "output_frames"
+output_dir = "out"
 os.makedirs(output_dir, exist_ok=True)
 
 # Function to detect color and return center positions
