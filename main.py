@@ -7,10 +7,7 @@ import zmq
 BLUE_POS_CRS =  (42.34300258212629, -71.09793934723564)         # correspoding lat and lon to blue color
 GREEN_POS_CRS = (42.34442061309218, -71.08302794110213)         # correspoding lat and lon to green color
 DEST_SERVER =  'tcp://IP:port'
-GUI = True
-OUT_DIR = "out"
-
-os.makedirs(OUT_DIR, exist_ok=True)
+GUI = False
 
 # Define color ranges in HSV (tweak these values based on your markers)
 color_ranges = {
