@@ -2,12 +2,14 @@ import logging
 import cv2
 import numpy as np
 import os
-
+import zmq
 
 BLUE_POS_CRS =  (42.34300258212629, -71.09793934723564)         # correspoding lat and lon to blue color
 GREEN_POS_CRS = (42.34442061309218, -71.08302794110213)         # correspoding lat and lon to green color
+DEST_SERVER =  'tcp://IP:port'
 GUI = True
 OUT_DIR = "out"
+
 os.makedirs(OUT_DIR, exist_ok=True)
 
 # Define color ranges in HSV (tweak these values based on your markers)
@@ -85,6 +87,12 @@ def rlpos2latlon(blue_pos, green_pos, red_pos):
 
     return red_lat, red_lon
 
+
+# Initialize ZeroMQ context and socket
+context = zmq.Context()
+socket = context.socket(zmq.PUSH)
+socket.connect(DEST_SERVER)
+
 # Initialize webcam
 cap = cv2.VideoCapture(0)
 try:
@@ -103,6 +111,10 @@ try:
             red_lat, red_lon = rlpos2latlon(positions["blue"], positions["green"], positions["red"])
             print(red_lat, red_lon)
 
+            # Send the location to the DEST_SERVER
+            location_data = {"latitude": red_lat, "longitude": red_lon}
+            socket.send_json(location_data)
+
         # Show the frame in a window if GUI is enabled
         if GUI:
             cv2.imshow("Frame", frame)
@@ -114,3 +126,5 @@ finally:
     cap.release()
     if GUI:
         cv2.destroyAllWindows()
+    socket.close()
+    context.term()
