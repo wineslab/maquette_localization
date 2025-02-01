@@ -1,13 +1,39 @@
 import logging
 import cv2
 import numpy as np
-import os
-import zmq
+import paho.mqtt.client as mqtt
 
-BLUE_POS_CRS =  (42.34300258212629, -71.09793934723564)         # correspoding lat and lon to blue color
-GREEN_POS_CRS = (42.34442061309218, -71.08302794110213)         # correspoding lat and lon to green color
-DEST_SERVER =  'tcp://IP:port'
-GUI = False
+logging.basicConfig(level=logging.INFO)
+
+BLUE_POS_CRS =  (42.33631053975632, -71.09353812118084)         # correspoding lat and lon to blue color
+GREEN_POS_CRS = (42.34251643366908, -71.08401409791034)         # correspoding lat and lon to green color
+GUI = True
+
+# MQTT setup
+mqtt_broker = "digiran-02.colosseum.net"
+mqtt_port = 1883
+mqtt_topic = "colosseum/update"
+mqtt_client = mqtt.Client()
+
+def on_connect(client, userdata, flags, rc):
+    if rc == 0:
+        logging.info("Connected to MQTT Broker!")
+    else:
+        logging.error(f"Failed to connect, return code {rc}")
+
+mqtt_client.on_connect = on_connect
+mqtt_client.connect(mqtt_broker, mqtt_port, 60)
+mqtt_client.loop_start()
+
+def send_mqtt_message(lat, lon):
+    message = {
+        "id": 0,
+        "dynscen_ids": [0],
+        "newPosition": {"lat": lat, "lng": lon},
+        "cmd": "update",
+        "type": "MQTTUpdate"
+    }
+    mqtt_client.publish(mqtt_topic, str(message))
 
 # Define color ranges in HSV (tweak these values based on your markers)
 color_ranges = {
@@ -85,12 +111,6 @@ def rlpos2latlon(blue_pos, green_pos, red_pos):
     return red_lat, red_lon
 
 
-# Initialize ZeroMQ context and socket
-context = zmq.Context()
-socket = context.socket(zmq.PUSH)
-socket.connect(DEST_SERVER)
-
-# Initialize webcam
 cap = cv2.VideoCapture(0)
 try:
     while True:
@@ -101,16 +121,11 @@ try:
 
         # Detect color positions
         positions = detect_color_positions(frame, color_ranges)
-
-        print(positions)
-
         if "blue" in positions and "green" in positions and "red" in positions:
             red_lat, red_lon = rlpos2latlon(positions["blue"], positions["green"], positions["red"])
-            print(red_lat, red_lon)
-
-            # Send the location to the DEST_SERVER
             location_data = {"latitude": red_lat, "longitude": red_lon}
-            socket.send_json(location_data)
+            send_mqtt_message(red_lat, red_lon)
+            logging.info(f"Red marker coordinates: Latitude = {red_lat}, Longitude = {red_lon}")
 
         # Show the frame in a window if GUI is enabled
         if GUI:
@@ -123,5 +138,3 @@ finally:
     cap.release()
     if GUI:
         cv2.destroyAllWindows()
-    socket.close()
-    context.term()
