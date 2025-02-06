@@ -9,7 +9,6 @@ logging.basicConfig(level=logging.INFO)
 # CRS coordinates for conversion (these remain fixed)
 BLUE_POS_CRS = (42.33631053975632, -71.09353812118084)
 GREEN_POS_CRS = (42.34251643366908, -71.08401409791034)
-
 GUI = True
 MOVE_THRESHOLD = 0.0001    # Maximum allowed change per frame for the red marker to be considered stable.
 STABILITY_FRAMES = 20      # Number of consecutive frames with minimal change before sending an update.
@@ -44,8 +43,8 @@ def send_mqtt_message(lat, lon):
 # Define HSV color ranges for the markers.
 # (Adjust these based on your lighting conditions.)
 color_ranges = {
-    "red":    ((0, 120, 120), (10, 255, 255)),    # Moving marker
-    "green":  ((40, 40, 40), (80, 255, 255)),       # Reference marker (top-right)
+    "red":    ((0, 120, 120), (10, 255, 255)),       # Moving marker
+    "green":  ((40, 40, 40), (80, 255, 255)),        # Reference marker (top-right)
     "blue":   ((100, 150, 0), (140, 255, 255)),      # Reference marker (top-left)
     "purple": ((130, 50, 50), (160, 255, 255)),      # Reference marker (bottom-left)
     "yellow": ((20, 100, 100), (30, 255, 255))       # Reference marker (bottom-right)
@@ -116,6 +115,8 @@ def rlpos2latlon(blue_pos, green_pos, red_pos):
     red_lon = BLUE_POS_CRS[1] + (blue_to_red_x / blue_to_green_x) * blue_to_green_lon
     return red_lat, red_lon
 
+
+
 # ---------------------- Global Calibration Variables ----------------------
 calibrated = False           # Flag indicating if calibration is complete.
 transformation_matrix = None # Will hold the one-time computed transformation matrix.
@@ -185,7 +186,7 @@ try:
                 # Check boundaries (0 to 800 in rectified frame).
                 if (red_transformed[0] < 0 or red_transformed[0] > 800 or 
                     red_transformed[1] < 0 or red_transformed[1] > 800):
-                    logging.info("Red marker is out of bounds. Not updating MQTT.")
+                    # logging.info("Red marker is out of bounds. Not updating MQTT.")
                     stable_count = 0
                 else:
                     # Compute lat/lon using the stored calibration positions.
