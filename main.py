@@ -9,7 +9,8 @@ logging.basicConfig(level=logging.INFO)
 # CRS coordinates for conversion (these remain fixed)
 BLUE_POS_CRS = (42.33631053975632, -71.09353812118084)
 GREEN_POS_CRS = (42.34251643366908, -71.08401409791034)
-GUI = True
+GUI = True                 # showing the frame 
+TEST_MODE = True           # if true, does not burn Colosseum/MQTT
 MOVE_THRESHOLD = 0.0001    # Maximum allowed change per frame for the red marker to be considered stable.
 STABILITY_FRAMES = 20      # Number of consecutive frames with minimal change before sending an update.
 
@@ -167,7 +168,8 @@ try:
                 calibrated = True
                 logging.info("Calibrated.")
                 if GUI:
-                    cv2.imshow("Cropped & Rectified", cropped_frame)
+                    # cv2.imshow("Cropped & Rectified", cropped_frame)
+                    cv2.imshow("Frame", frame)
             else:
                 # Optionally show the original frame while waiting for calibration.
                 if GUI:
@@ -176,7 +178,8 @@ try:
             # Calibration is done. Use the stored transformation matrix.
             rectified_frame = cv2.warpPerspective(frame, transformation_matrix, (800, 800))
             if GUI:
-                cv2.imshow("Cropped & Rectified", rectified_frame)
+                # cv2.imshow("Cropped & Rectified", rectified_frame)
+                cv2.imshow("Frame", frame)
 
             # Now detect only the red marker.
             red_positions = detect_color_positions(frame, {"red": color_ranges["red"]})
@@ -209,7 +212,8 @@ try:
                         if (last_sent_position is None or
                             abs(current_red_position[0] - last_sent_position[0]) > MOVE_THRESHOLD or
                             abs(current_red_position[1] - last_sent_position[1]) > MOVE_THRESHOLD):
-                            send_mqtt_message(red_lat, red_lon)
+                            if not TEST_MODE:
+                                send_mqtt_message(red_lat, red_lon)
                             logging.info(f"Red marker (stable): {red_lat}, {red_lon}")
                             last_sent_position = current_red_position
                             stable_count = 0
