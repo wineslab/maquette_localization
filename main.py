@@ -10,25 +10,27 @@ logging.basicConfig(level=logging.INFO)
 BLUE_POS_CRS = (42.33631053975632, -71.09353812118084)
 GREEN_POS_CRS = (42.34251643366908, -71.08401409791034)
 GUI = True                 # showing the frame 
-TEST_MODE = True           # if true, does not burn Colosseum/MQTT
+TEST_MODE = False           # if true, does not burn Colosseum/MQTT
 MOVE_THRESHOLD = 0.0001    # Maximum allowed change per frame for the red marker to be considered stable.
 STABILITY_FRAMES = 20      # Number of consecutive frames with minimal change before sending an update.
 
-# MQTT setup
-mqtt_broker = "digiran-02.colosseum.net"
-mqtt_port = 1883
-mqtt_topic = "colosseum/update"
-mqtt_client = mqtt.Client()
 
-def on_connect(client, userdata, flags, rc):
-    if rc == 0:
-        logging.info("Connected to MQTT Broker!")
-    else:
-        logging.error(f"Failed to connect, return code {rc}")
+if not TEST_MODE:
+    # MQTT setup
+    mqtt_broker = "digiran-02.colosseum.net"
+    mqtt_port = 1883
+    mqtt_topic = "colosseum/update"
+    mqtt_client = mqtt.Client()
 
-mqtt_client.on_connect = on_connect
-mqtt_client.connect(mqtt_broker, mqtt_port, 60)
-mqtt_client.loop_start()
+    def on_connect(client, userdata, flags, rc):
+        if rc == 0:
+            logging.info("Connected to MQTT Broker!")
+        else:
+            logging.error(f"Failed to connect, return code {rc}")
+
+    mqtt_client.on_connect = on_connect
+    mqtt_client.connect(mqtt_broker, mqtt_port, 60)
+    mqtt_client.loop_start()
 
 def send_mqtt_message(lat, lon):
     # Ensure lat and lon are Python floats (not np.float32) for JSON serialization.
@@ -131,6 +133,10 @@ last_sent_position = None
 
 # Open the video capture device.
 cap = cv2.VideoCapture(0)
+width = 1920
+height = 1080
+cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
+cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
 try:
     while True:
@@ -168,21 +174,22 @@ try:
                 calibrated = True
                 logging.info("Calibrated.")
                 if GUI:
-                    # cv2.imshow("Cropped & Rectified", cropped_frame)
-                    cv2.imshow("Frame", frame)
+                    cv2.imshow("Cropped & Rectified", cropped_frame)
+                    cv2.putText(frame, "Calibrated", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
+                    # cv2.imshow("Frame", frame)
             else:
                 # Optionally show the original frame while waiting for calibration.
                 if GUI:
                     cv2.imshow("Frame", frame)
+                    cv2.putText(frame, "Calibrating...", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
         else:
             # Calibration is done. Use the stored transformation matrix.
             rectified_frame = cv2.warpPerspective(frame, transformation_matrix, (800, 800))
-            if GUI:
-                # cv2.imshow("Cropped & Rectified", rectified_frame)
-                cv2.imshow("Frame", frame)
+            
 
             # Now detect only the red marker.
             red_positions = detect_color_positions(frame, {"red": color_ranges["red"]})
+            current_red_position = None
             if "red" in red_positions:
                 red_pt = np.array([[red_positions["red"]]], dtype="float32")
                 red_transformed = cv2.perspectiveTransform(red_pt, transformation_matrix)[0][0]
@@ -220,6 +227,14 @@ try:
             else:
                 logging.info("Red marker not found.")
                 stable_count = 0
+
+            if GUI:
+                # cv2.imshow("Cropped & Rectified", rectified_frame)
+                cv2.imshow("Frame", frame)
+                if "red" in red_positions:
+                    cv2.putText(frame, f"Red: {current_red_position}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                elif prev_red_position is not None:
+                    cv2.putText(frame, f"Red: {prev_red_position}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
