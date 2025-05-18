@@ -3,23 +3,56 @@ import cv2
 import numpy as np
 import json
 import paho.mqtt.client as mqtt
+import yaml
+import os
 
 logging.basicConfig(level=logging.INFO)
 
-# CRS coordinates for conversion (these remain fixed)
-BLUE_POS_CRS = (42.33631053975632, -71.09353812118084)
-GREEN_POS_CRS = (42.34251643366908, -71.08401409791034)
-GUI = True                 # showing the frame 
-TEST_MODE = False           # if true, does not burn Colosseum/MQTT
-MOVE_THRESHOLD = 0.0001    # Maximum allowed change per frame for the red marker to be considered stable.
-STABILITY_FRAMES = 20      # Number of consecutive frames with minimal change before sending an update.
+# Load configuration from YAML
+CONFIG_PATH = os.path.join(os.path.dirname(__file__), 'config.yml')
+with open(CONFIG_PATH, 'r') as f:
+    config = yaml.safe_load(f)
 
+# Extract config values
+gui = config.get('gui', True)
+test_mode = config.get('test_mode', False)
+move_threshold = config.get('move_threshold', 0.0001)
+stability_frames = config.get('stability_frames', 20)
 
-if not TEST_MODE:
+mqtt_config = config['mqtt']
+mqtt_broker = mqtt_config['broker']
+mqtt_port = mqtt_config['port']
+mqtt_topic = mqtt_config['topic']
+mqtt_id = mqtt_config['id']
+mqtt_dynscen_ids = mqtt_config['dynscen_ids']
+
+webcam_config = config['webcam']
+webcam_index = webcam_config.get('index', 0)
+width = webcam_config.get('width', 1920)
+height = webcam_config.get('height', 1080)
+
+crs = config['crs']
+BLUE_POS_CRS = tuple(crs['blue'])
+GREEN_POS_CRS = tuple(crs['green'])
+
+color_ranges = {}
+for color, val in config['color_ranges'].items():
+    color_ranges[color] = (tuple(val['lower']), tuple(val['upper']))
+
+# ---------------------- Global Calibration Variables ----------------------
+calibrated = False           # Flag indicating if calibration is complete.
+transformation_matrix = None # Will hold the one-time computed transformation matrix.
+blue_cal = None              # Blue marker's rectified position from calibration.
+green_cal = None             # Green marker's rectified position from calibration.
+
+# Variables for moving node stability (dicts for each node)
+moving_nodes = config.get('moving_nodes', ['red'])
+stable_count = {node: 0 for node in moving_nodes}
+prev_position = {node: None for node in moving_nodes}
+last_sent_position = {node: None for node in moving_nodes}
+
+if not test_mode:
     # MQTT setup
-    mqtt_broker = "digiran-02.colosseum.net"
-    mqtt_port = 1883
-    mqtt_topic = "colosseum/update"
     mqtt_client = mqtt.Client()
 
     def on_connect(client, userdata, flags, rc):
@@ -35,8 +68,8 @@ if not TEST_MODE:
 def send_mqtt_message(lat, lon):
     # Ensure lat and lon are Python floats (not np.float32) for JSON serialization.
     message = {
-        "id": 2,
-        "dynscen_ids": [2],
+        "id": mqtt_id,
+        "dynscen_ids": mqtt_dynscen_ids,
         "newPosition": {"lat": float(lat), "lng": float(lon)},
         "cmd": "update",
         "type": "MQTTUpdate"
@@ -45,13 +78,13 @@ def send_mqtt_message(lat, lon):
 
 # Define HSV color ranges for the markers.
 # (Adjust these based on your lighting conditions.)
-color_ranges = {
-    "red":    ((0, 120, 120), (10, 255, 255)),       # Moving marker
-    "green":  ((40, 40, 40), (80, 255, 255)),        # Reference marker (top-right)
-    "blue":   ((100, 150, 0), (140, 255, 255)),      # Reference marker (top-left)
-    "purple": ((130, 50, 50), (160, 255, 255)),      # Reference marker (bottom-left)
-    "yellow": ((20, 100, 100), (30, 255, 255))       # Reference marker (bottom-right)
-}
+# color_ranges = {
+#     "red":    ((0, 120, 120), (10, 255, 255)),       # Moving marker
+#     "green":  ((40, 40, 40), (80, 255, 255)),        # Reference marker (top-right)
+#     "blue":   ((100, 150, 0), (140, 255, 255)),      # Reference marker (top-left)
+#     "purple": ((130, 50, 50), (160, 255, 255)),      # Reference marker (bottom-left)
+#     "yellow": ((20, 100, 100), (30, 255, 255))       # Reference marker (bottom-right)
+# }
 
 def detect_color_positions(frame, ranges):
     """
@@ -118,23 +151,8 @@ def rlpos2latlon(blue_pos, green_pos, red_pos):
     red_lon = BLUE_POS_CRS[1] + (blue_to_red_x / blue_to_green_x) * blue_to_green_lon
     return red_lat, red_lon
 
-
-
-# ---------------------- Global Calibration Variables ----------------------
-calibrated = False           # Flag indicating if calibration is complete.
-transformation_matrix = None # Will hold the one-time computed transformation matrix.
-blue_cal = None              # Blue marker's rectified position from calibration.
-green_cal = None             # Green marker's rectified position from calibration.
-
-# Variables for red marker stability.
-stable_count = 0
-prev_red_position = None
-last_sent_position = None
-
 # Open the video capture device.
-cap = cv2.VideoCapture(0)
-width = 1920
-height = 1080
+cap = cv2.VideoCapture(webcam_index)
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
 cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
 
@@ -173,68 +191,67 @@ try:
                 green_cal = cv2.perspectiveTransform(green_pt, transformation_matrix)[0][0]
                 calibrated = True
                 logging.info("Calibrated.")
-                if GUI:
+                if gui:
                     cv2.imshow("Cropped & Rectified", cropped_frame)
                     cv2.putText(frame, "Calibrated", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
                     # cv2.imshow("Frame", frame)
             else:
                 # Optionally show the original frame while waiting for calibration.
-                if GUI:
+                if gui:
                     cv2.imshow("Frame", frame)
                     cv2.putText(frame, "Calibrating...", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
         else:
             # Calibration is done. Use the stored transformation matrix.
             rectified_frame = cv2.warpPerspective(frame, transformation_matrix, (800, 800))
-            
 
-            # Now detect only the red marker.
-            red_positions = detect_color_positions(frame, {"red": color_ranges["red"]})
-            current_red_position = None
-            if "red" in red_positions:
-                red_pt = np.array([[red_positions["red"]]], dtype="float32")
-                red_transformed = cv2.perspectiveTransform(red_pt, transformation_matrix)[0][0]
-                # Check boundaries (0 to 800 in rectified frame).
-                if (red_transformed[0] < 0 or red_transformed[0] > 800 or 
-                    red_transformed[1] < 0 or red_transformed[1] > 800):
-                    # logging.info("Red marker is out of bounds. Not updating MQTT.")
-                    stable_count = 0
-                else:
-                    # Compute lat/lon using the stored calibration positions.
-                    red_lat, red_lon = rlpos2latlon(blue_cal, green_cal, red_transformed)
-                    current_red_position = (red_lat, red_lon)
-
-                    # Stability check.
-                    if prev_red_position is not None:
-                        if (abs(current_red_position[0] - prev_red_position[0]) < MOVE_THRESHOLD and
-                            abs(current_red_position[1] - prev_red_position[1]) < MOVE_THRESHOLD):
-                            stable_count += 1
-                        else:
-                            stable_count = 0
+            # Detect all moving nodes
+            moving_ranges = {node: color_ranges[node] for node in moving_nodes}
+            node_positions = detect_color_positions(frame, moving_ranges)
+            current_positions = {}
+            for node in moving_nodes:
+                if node in node_positions:
+                    node_pt = np.array([[node_positions[node]]], dtype="float32")
+                    node_transformed = cv2.perspectiveTransform(node_pt, transformation_matrix)[0][0]
+                    # Check boundaries (0 to 800 in rectified frame).
+                    if (node_transformed[0] < 0 or node_transformed[0] > 800 or 
+                        node_transformed[1] < 0 or node_transformed[1] > 800):
+                        stable_count[node] = 0
                     else:
-                        stable_count = 0
+                        # Compute lat/lon using the stored calibration positions.
+                        node_lat, node_lon = rlpos2latlon(blue_cal, green_cal, node_transformed)
+                        current_positions[node] = (node_lat, node_lon)
 
-                    prev_red_position = current_red_position
+                        # Stability check.
+                        if prev_position[node] is not None:
+                            if (abs(current_positions[node][0] - prev_position[node][0]) < move_threshold and
+                                abs(current_positions[node][1] - prev_position[node][1]) < move_threshold):
+                                stable_count[node] += 1
+                            else:
+                                stable_count[node] = 0
+                        else:
+                            stable_count[node] = 0
 
-                    if stable_count >= STABILITY_FRAMES:
-                        if (last_sent_position is None or
-                            abs(current_red_position[0] - last_sent_position[0]) > MOVE_THRESHOLD or
-                            abs(current_red_position[1] - last_sent_position[1]) > MOVE_THRESHOLD):
-                            if not TEST_MODE:
-                                send_mqtt_message(red_lat, red_lon)
-                            logging.info(f"Red marker (stable): {red_lat}, {red_lon}")
-                            last_sent_position = current_red_position
-                            stable_count = 0
-            else:
-                logging.info("Red marker not found.")
-                stable_count = 0
+                        prev_position[node] = current_positions[node]
 
-            if GUI:
-                # cv2.imshow("Cropped & Rectified", rectified_frame)
+                        if stable_count[node] >= stability_frames:
+                            if (last_sent_position[node] is None or
+                                abs(current_positions[node][0] - last_sent_position[node][0]) > move_threshold or
+                                abs(current_positions[node][1] - last_sent_position[node][1]) > move_threshold):
+                                if not test_mode:
+                                    send_mqtt_message(node_lat, node_lon)
+                                logging.info(f"{node.capitalize()} marker (stable): {node_lat}, {node_lon}")
+                                last_sent_position[node] = current_positions[node]
+                                stable_count[node] = 0
+                else:
+                    stable_count[node] = 0
+                    logging.info(f"{node.capitalize()} marker not found.")
+
+            if gui:
                 cv2.imshow("Frame", frame)
-                if "red" in red_positions:
-                    cv2.putText(frame, f"Red: {current_red_position}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                elif prev_red_position is not None:
-                    cv2.putText(frame, f"Red: {prev_red_position}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
+                for node in moving_nodes:
+                    pos = current_positions.get(node) or prev_position.get(node)
+                    if pos is not None:
+                        cv2.putText(frame, f"{node.capitalize()}: {pos}", (50, 100 + 30 * moving_nodes.index(node)), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
         if cv2.waitKey(1) & 0xFF == ord('q'):
             break
@@ -243,5 +260,5 @@ except Exception as e:
     logging.error("An error occurred: %s", e)
 finally:
     cap.release()
-    if GUI:
+    if gui:
         cv2.destroyAllWindows()

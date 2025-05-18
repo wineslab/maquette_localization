@@ -1,0 +1,43 @@
+# Configuration for maquette_localization
+
+mqtt:
+  broker: "digiran-02.colosseum.net"
+  port: 1883
+  topic: "colosseum/update"
+  id: 2
+  dynscen_ids: [2]
+
+webcam:
+  index: 0
+  width: 1920
+  height: 1080
+
+gui: true
+test_mode: false
+move_threshold: 0.0001
+stability_frames: 20
+
+crs:
+  blue: [42.33631053975632, -71.09353812118084]
+  green: [42.34251643366908, -71.08401409791034]
+
+color_ranges:
+  red:
+    lower: [0, 120, 120]
+    upper: [10, 255, 255]
+  green:
+    lower: [40, 40, 40]
+    upper: [80, 255, 255]
+  blue:
+    lower: [100, 150, 0]
+    upper: [140, 255, 255]
+  purple:
+    lower: [130, 50, 50]
+    upper: [160, 255, 255]
+  yellow:
+    lower: [20, 100, 100]
+    upper: [30, 255, 255]
+
+# List of moving nodes (e.g., ["red", "orange"])
+moving_nodes:
+  - red
