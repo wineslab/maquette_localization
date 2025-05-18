@@ -1,3 +1,4 @@
+version: '3.8'
 services:
   localization:
     build: .
@@ -8,4 +9,7 @@ services:
       - "/dev/video0:/dev/video0"  # Give container access to the webcam
     environment:
       - PYTHONUNBUFFERED=1
+      - DISPLAY=${DISPLAY}
+    stdin_open: true
+    tty: true
     restart: unless-stopped
