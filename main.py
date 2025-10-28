@@ -2,7 +2,10 @@ import logging
 import cv2
 import numpy as np
 import json
+import socket
 import paho.mqtt.client as mqtt
+import glob
+import os
 
 logging.basicConfig(level=logging.INFO)
 
@@ -20,7 +23,8 @@ if not TEST_MODE:
     mqtt_broker = "digiran-02.colosseum.net"
     mqtt_port = 1883
     mqtt_topic = "colosseum/update"
-    mqtt_client = mqtt.Client()
+    # Use a specific protocol version to avoid ambiguous defaults.
+    mqtt_client = mqtt.Client(protocol=mqtt.MQTTv311)
 
     def on_connect(client, userdata, flags, rc):
         if rc == 0:
@@ -29,8 +33,16 @@ if not TEST_MODE:
             logging.error(f"Failed to connect, return code {rc}")
 
     mqtt_client.on_connect = on_connect
-    mqtt_client.connect(mqtt_broker, mqtt_port, 60)
-    mqtt_client.loop_start()
+    # Attempt to connect, but handle DNS/socket errors gracefully so the
+    # application can continue running (e.g., in offline or dev environments).
+    try:
+        mqtt_client.connect(mqtt_broker, mqtt_port, 60)
+        mqtt_client.loop_start()
+    except Exception as e:
+        # Common root causes include socket.gaierror (DNS) or connection refused.
+        logging.error("MQTT connection failed (%s:%s): %s", mqtt_broker, mqtt_port, e)
+        logging.info("Continuing without MQTT (mqtt_client set to None).")
+        mqtt_client = None
 
 def send_mqtt_message(lat, lon):
     # Ensure lat and lon are Python floats (not np.float32) for JSON serialization.
@@ -41,7 +53,19 @@ def send_mqtt_message(lat, lon):
         "cmd": "update",
         "type": "MQTTUpdate"
     }
-    mqtt_client.publish(mqtt_topic, json.dumps(message))
+    # If MQTT is disabled/unavailable (None) or we're in TEST_MODE, do not attempt
+    # to publish — just log for debugging.
+    if TEST_MODE:
+        logging.debug("TEST_MODE enabled - not sending MQTT message: %s", message)
+        return
+    if mqtt_client is None:
+        logging.debug("mqtt_client is not connected - cannot send message: %s", message)
+        return
+
+    try:
+        mqtt_client.publish(mqtt_topic, json.dumps(message))
+    except Exception as e:
+        logging.error("Failed to publish MQTT message: %s", e)
 
 # Define HSV color ranges for the markers.
 # (Adjust these based on your lighting conditions.)
@@ -132,7 +156,88 @@ prev_red_position = None
 last_sent_position = None
 
 # Open the video capture device.
-cap = cv2.VideoCapture(0)
+def find_camera_device(vendor_id=None, product_id=None, name_substr=None):
+    """
+    Try to locate a /dev/video* device matching vendor_id/product_id (hex strings
+    without 0x) or containing name_substr in the sysfs name entry.
+    Returns the device path like '/dev/video5' or None.
+    """
+    for dev in sorted(glob.glob('/dev/video*')):
+        base = os.path.basename(dev)
+        name_path = f'/sys/class/video4linux/{base}/name'
+        name = ''
+        try:
+            with open(name_path, 'r') as f:
+                name = f.read().strip()
+        except Exception:
+            name = ''
+
+        if name_substr and name_substr.lower() in name.lower():
+            return dev
+
+        # Resolve the device sysfs path and walk up to find idVendor/idProduct
+        try:
+            devpath = os.path.realpath(f'/sys/class/video4linux/{base}/device')
+        except Exception:
+            devpath = None
+
+        if devpath:
+            cur = devpath
+            for _ in range(6):
+                vid = os.path.join(cur, 'idVendor')
+                pid = os.path.join(cur, 'idProduct')
+                if os.path.exists(vid) and os.path.exists(pid):
+                    try:
+                        with open(vid, 'r') as f:
+                            vidv = f.read().strip()
+                        with open(pid, 'r') as f:
+                            pidv = f.read().strip()
+                        # Compare lowercased hex values without leading 0x
+                        if vendor_id and product_id and vidv.lower().lstrip('0x') == vendor_id.lower().lstrip('0x') and pidv.lower().lstrip('0x') == product_id.lower().lstrip('0x'):
+                            return dev
+                    except Exception:
+                        pass
+                # move up one level
+                parent = os.path.dirname(cur)
+                if parent == cur:
+                    break
+                cur = parent
+
+    return None
+
+
+# Prefer the HDMI USB Camera (lsusb: 32e4:3415) if present, else try indices then nodes.
+preferred_dev = find_camera_device(vendor_id='32e4', product_id='3415', name_substr='HDMI USB Camera')
+if preferred_dev:
+    logging.info('Using detected camera device: %s', preferred_dev)
+    cap = cv2.VideoCapture(preferred_dev)
+else:
+    logging.info('Preferred camera not found; trying indices 0..7')
+    cap = None
+    for i in range(8):
+        test = cv2.VideoCapture(i)
+        if test.isOpened():
+            logging.info('Opened camera index %d', i)
+            cap = test
+            break
+        test.release()
+
+    if cap is None:
+        # try /dev/video* nodes
+        for dev in sorted(glob.glob('/dev/video*')):
+            try:
+                cap_try = cv2.VideoCapture(dev)
+                if cap_try.isOpened():
+                    logging.info('Opened camera device %s', dev)
+                    cap = cap_try
+                    break
+                cap_try.release()
+            except Exception:
+                pass
+
+    if cap is None:
+        logging.error('No camera could be opened. Falling back to index 0 (may still fail).')
+        cap = cv2.VideoCapture(0)
 width = 1920
 height = 1080
 cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
