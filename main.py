@@ -2,28 +2,34 @@ import logging
 import cv2
 import numpy as np
 import json
-import socket
 import paho.mqtt.client as mqtt
 import glob
 import os
 
 logging.basicConfig(level=logging.INFO)
 
-# CRS coordinates for conversion (these remain fixed)
-BLUE_POS_CRS = (42.33631053975632, -71.09353812118084)
-GREEN_POS_CRS = (42.34251643366908, -71.08401409791034)
-GUI = True                 # showing the frame 
-TEST_MODE = False           # if true, does not burn Colosseum/MQTT
-MOVE_THRESHOLD = 0.0001    # Maximum allowed change per frame for the red marker to be considered stable.
-STABILITY_FRAMES = 20      # Number of consecutive frames with minimal change before sending an update.
+# CRS coordinates for conversion (reference corners in geographic CRS)
+# Top-Left (north-west) and Bottom-Right (south-east) corners of the map
+CRS_TOP_LEFT = (42.33631053975632, -71.09353812118084)
+CRS_BOTTOM_RIGHT = (42.34251643366908, -71.08401409791034)
 
+# Configuration
+TEST_MODE = False
+MOVE_THRESHOLD = 0.0001
+STABILITY_FRAMES = 20
+DISPLAY_SCALE = 1.0  # Scale factor for display windows
 
+# Output (rectified) map size and window titles
+OUTPUT_SIZE = (1600, 1600)
+CALIBRATION_WINDOW = "Calibration"
+ORIGINAL_WINDOW = "Original"
+RECTIFIED_WINDOW = "Rectified Map"
+
+# MQTT setup
 if not TEST_MODE:
-    # MQTT setup
     mqtt_broker = "digiran-02.colosseum.net"
     mqtt_port = 1883
     mqtt_topic = "colosseum/update"
-    # Use a specific protocol version to avoid ambiguous defaults.
     mqtt_client = mqtt.Client(protocol=mqtt.MQTTv311)
 
     def on_connect(client, userdata, flags, rc):
@@ -33,28 +39,24 @@ if not TEST_MODE:
             logging.error(f"Failed to connect, return code {rc}")
 
     mqtt_client.on_connect = on_connect
-    # Attempt to connect, but handle DNS/socket errors gracefully so the
-    # application can continue running (e.g., in offline or dev environments).
     try:
         mqtt_client.connect(mqtt_broker, mqtt_port, 60)
         mqtt_client.loop_start()
     except Exception as e:
-        # Common root causes include socket.gaierror (DNS) or connection refused.
         logging.error("MQTT connection failed (%s:%s): %s", mqtt_broker, mqtt_port, e)
         logging.info("Continuing without MQTT (mqtt_client set to None).")
         mqtt_client = None
 
-def send_mqtt_message(lat, lon):
-    # Ensure lat and lon are Python floats (not np.float32) for JSON serialization.
+
+def send_mqtt_message(node_id, lat, lon):
+    """Send MQTT message for a node update."""
     message = {
-        "id": 2,
-        "dynscen_ids": [2],
+        "id": node_id,
+        "dynscen_ids": [node_id],
         "newPosition": {"lat": float(lat), "lng": float(lon)},
         "cmd": "update",
         "type": "MQTTUpdate"
     }
-    # If MQTT is disabled/unavailable (None) or we're in TEST_MODE, do not attempt
-    # to publish — just log for debugging.
     if TEST_MODE:
         logging.debug("TEST_MODE enabled - not sending MQTT message: %s", message)
         return
@@ -67,20 +69,29 @@ def send_mqtt_message(lat, lon):
     except Exception as e:
         logging.error("Failed to publish MQTT message: %s", e)
 
-# Define HSV color ranges for the markers.
-# (Adjust these based on your lighting conditions.)
+
+# Define HSV color ranges for all markers (now all are trackable nodes)
 color_ranges = {
-    "red":    ((0, 120, 120), (10, 255, 255)),       # Moving marker
-    "green":  ((40, 40, 40), (80, 255, 255)),        # Reference marker (top-right)
-    "blue":   ((100, 150, 0), (140, 255, 255)),      # Reference marker (top-left)
-    "purple": ((130, 50, 50), (160, 255, 255)),      # Reference marker (bottom-left)
-    "yellow": ((20, 100, 100), (30, 255, 255))       # Reference marker (bottom-right)
+    "red":    ((0, 120, 120), (10, 255, 255)),
+    "green":  ((40, 40, 40), (80, 255, 255)),
+    "blue":   ((100, 150, 0), (140, 255, 255)),
+    "purple": ((130, 50, 50), (160, 255, 255)),
+    "yellow": ((20, 100, 100), (30, 255, 255))
 }
+
+# Map colors to node IDs for MQTT
+color_to_node_id = {
+    "red": 2,
+    "green": 3,
+    "blue": 4,
+    "purple": 5,
+    "yellow": 6
+}
+
 
 def detect_color_positions(frame, ranges):
     """
     Detects markers in the frame and returns a dictionary mapping color names to (x, y) positions.
-    The 'ranges' parameter is a dictionary containing only the desired colors.
     """
     hsv = cv2.cvtColor(frame, cv2.COLOR_BGR2HSV)
     positions = {}
@@ -90,28 +101,23 @@ def detect_color_positions(frame, ranges):
         mask = cv2.dilate(mask, None, iterations=2)
         contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         if contours:
-            # Use the largest contour (assumed to be the marker)
             c = max(contours, key=cv2.contourArea)
-            if cv2.contourArea(c) > 20:  # Filter out noise
+            if cv2.contourArea(c) > 20:
                 M = cv2.moments(c)
                 if M["m00"] > 0:
                     center_x = int(M["m10"] / M["m00"])
                     center_y = int(M["m01"] / M["m00"])
                     positions[color] = (center_x, center_y)
-                    # Draw for visualization.
-                    cv2.circle(frame, (center_x, center_y), 10, (0, 255, 0), -1)
-                    cv2.putText(frame, color, (center_x - 20, center_y - 20),
-                                cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
     return positions
 
-def perspective_transform(image, src_points):
+
+def perspective_transform(image, src_points, output_size=OUTPUT_SIZE):
     """
     Applies a perspective transform to crop and rectify the region defined by src_points.
-    src_points: a 4x2 array of marker positions (in the original frame).
+    src_points: a 4x2 array of corner positions (top-left, top-right, bottom-right, bottom-left).
     Returns the rectified image and the transformation matrix.
     """
-    width = 800   # Desired output width.
-    height = 800  # Desired output height.
+    width, height = output_size
     dst_points = np.float32([
         [0, 0],
         [width, 0],
@@ -122,44 +128,134 @@ def perspective_transform(image, src_points):
     result = cv2.warpPerspective(image, matrix, (width, height))
     return result, matrix
 
-def rlpos2latlon(blue_pos, green_pos, red_pos):
+
+def pixel_to_latlon(pixel_pos, output_size=OUTPUT_SIZE):
     """
-    Computes the red marker's latitude and longitude using linear interpolation
-    based on the positions of the blue and green markers (in the rectified frame).
+    Converts a pixel position in the rectified frame to lat/lon coordinates.
+    Uses linear interpolation based on the reference CRS coordinates.
     """
-    blue_to_green_x = green_pos[0] - blue_pos[0]
-    blue_to_green_y = green_pos[1] - blue_pos[1]
-    blue_to_red_x = red_pos[0] - blue_pos[0]
-    blue_to_red_y = red_pos[1] - blue_pos[1]
-
-    blue_to_green_lat = GREEN_POS_CRS[0] - BLUE_POS_CRS[0]
-    blue_to_green_lon = GREEN_POS_CRS[1] - BLUE_POS_CRS[1]
-
-    if blue_to_green_x == 0 or blue_to_green_y == 0:
-        return BLUE_POS_CRS
-
-    red_lat = BLUE_POS_CRS[0] + (blue_to_red_y / blue_to_green_y) * blue_to_green_lat
-    red_lon = BLUE_POS_CRS[1] + (blue_to_red_x / blue_to_green_x) * blue_to_green_lon
-    return red_lat, red_lon
-
+    width, height = output_size
+    x, y = pixel_pos
+    
+    # Normalize to [0, 1] range
+    x_norm = x / width
+    y_norm = y / height
+    
+    # Linear interpolation between the reference points
+    # Assuming top-left (CRS_TOP_LEFT) to bottom-right (CRS_BOTTOM_RIGHT)
+    lat = CRS_TOP_LEFT[0] + y_norm * (CRS_BOTTOM_RIGHT[0] - CRS_TOP_LEFT[0])
+    lon = CRS_TOP_LEFT[1] + x_norm * (CRS_BOTTOM_RIGHT[1] - CRS_TOP_LEFT[1])
+    
+    return lat, lon
 
 
-# ---------------------- Global Calibration Variables ----------------------
-calibrated = False           # Flag indicating if calibration is complete.
-transformation_matrix = None # Will hold the one-time computed transformation matrix.
-blue_cal = None              # Blue marker's rectified position from calibration.
-green_cal = None             # Green marker's rectified position from calibration.
+class InteractiveCalibrator:
+    """Handles interactive corner selection for calibration."""
+    
+    def __init__(self, window_name=CALIBRATION_WINDOW):
+        self.window_name = window_name
+        self.corners = []
+        self.current_frame = None
+        self.display_frame = None
+        
+    def mouse_callback(self, event, x, y, flags, param):
+        """Handle mouse clicks for corner selection."""
+        if event == cv2.EVENT_LBUTTONDOWN and len(self.corners) < 4:
+            # Scale coordinates back to original frame size
+            actual_x = int(x / DISPLAY_SCALE)
+            actual_y = int(y / DISPLAY_SCALE)
+            self.corners.append((actual_x, actual_y))
+            logging.info(f"Corner {len(self.corners)} selected at ({actual_x}, {actual_y})")
+            self.update_display()
+    
+    def update_display(self):
+        """Update the display with current corner selections."""
+        if self.current_frame is None:
+            return
+        
+        self.display_frame = self.current_frame.copy()
+        
+        # Draw selected corners
+        for i, corner in enumerate(self.corners):
+            cv2.circle(self.display_frame, corner, 10, (0, 255, 0), -1)
+            cv2.putText(self.display_frame, f"{i+1}", 
+                       (corner[0] + 15, corner[1] - 15),
+                       cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
+        
+        # Draw lines between corners
+        if len(self.corners) > 1:
+            for i in range(len(self.corners)):
+                cv2.line(self.display_frame, self.corners[i], 
+                        self.corners[(i + 1) % len(self.corners)], 
+                        (0, 255, 0), 2)
+        
+        # Instructions
+        instruction = f"Click corner {len(self.corners) + 1}/4"
+        if len(self.corners) == 4:
+            instruction = "Press ENTER to confirm, 'r' to reset"
+        
+        cv2.putText(self.display_frame, instruction, (20, 40),
+                   cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
+        cv2.putText(self.display_frame, "Order: Top-Left, Top-Right, Bottom-Right, Bottom-Left", 
+                   (20, 80), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (255, 255, 255), 1)
+        
+        # Scale down for display if needed
+        if DISPLAY_SCALE != 1.0:
+            height, width = self.display_frame.shape[:2]
+            new_width = int(width * DISPLAY_SCALE)
+            new_height = int(height * DISPLAY_SCALE)
+            display_scaled = cv2.resize(self.display_frame, (new_width, new_height))
+            cv2.imshow(self.window_name, display_scaled)
+        else:
+            cv2.imshow(self.window_name, self.display_frame)
+    
+    def calibrate(self, cap):
+        """
+        Interactive calibration process.
+        Returns the transformation matrix or None if cancelled.
+        """
+        cv2.namedWindow(self.window_name, cv2.WINDOW_NORMAL)
+        cv2.setMouseCallback(self.window_name, self.mouse_callback)
+        
+        logging.info("Starting interactive calibration...")
+        logging.info("Click 4 corners in order: Top-Left, Top-Right, Bottom-Right, Bottom-Left")
+        
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                logging.error("Failed to grab frame during calibration")
+                return None
+            
+            self.current_frame = frame
+            if len(self.corners) == 0:
+                self.update_display()
+            
+            key = cv2.waitKey(1) & 0xFF
+            
+            if key == ord('r'):
+                # Reset corners
+                self.corners = []
+                logging.info("Corners reset")
+                self.update_display()
+            elif key == 13 and len(self.corners) == 4:  # Enter key
+                # Confirm calibration
+                src_points = np.float32(self.corners)
+                _, matrix = perspective_transform(frame, src_points)
+                logging.info("Calibration complete!")
+                cv2.destroyWindow(self.window_name)
+                return matrix
+            elif key == ord('q'):
+                # Cancel
+                logging.info("Calibration cancelled")
+                cv2.destroyWindow(self.window_name)
+                return None
+        
+        return None
 
-# Variables for red marker stability.
-stable_count = 0
-prev_red_position = None
-last_sent_position = None
 
-# Open the video capture device.
 def find_camera_device(vendor_id=None, product_id=None, name_substr=None):
     """
-    Try to locate a /dev/video* device matching vendor_id/product_id (hex strings
-    without 0x) or containing name_substr in the sysfs name entry.
+    Try to locate a /dev/video* device matching vendor_id/product_id or name_substr.
     Returns the device path like '/dev/video5' or None.
     """
     for dev in sorted(glob.glob('/dev/video*')):
@@ -175,7 +271,6 @@ def find_camera_device(vendor_id=None, product_id=None, name_substr=None):
         if name_substr and name_substr.lower() in name.lower():
             return dev
 
-        # Resolve the device sysfs path and walk up to find idVendor/idProduct
         try:
             devpath = os.path.realpath(f'/sys/class/video4linux/{base}/device')
         except Exception:
@@ -192,12 +287,10 @@ def find_camera_device(vendor_id=None, product_id=None, name_substr=None):
                             vidv = f.read().strip()
                         with open(pid, 'r') as f:
                             pidv = f.read().strip()
-                        # Compare lowercased hex values without leading 0x
                         if vendor_id and product_id and vidv.lower().lstrip('0x') == vendor_id.lower().lstrip('0x') and pidv.lower().lstrip('0x') == product_id.lower().lstrip('0x'):
                             return dev
                     except Exception:
                         pass
-                # move up one level
                 parent = os.path.dirname(cur)
                 if parent == cur:
                     break
@@ -206,147 +299,184 @@ def find_camera_device(vendor_id=None, product_id=None, name_substr=None):
     return None
 
 
-# Prefer the HDMI USB Camera (lsusb: 32e4:3415) if present, else try indices then nodes.
-preferred_dev = find_camera_device(vendor_id='32e4', product_id='3415', name_substr='HDMI USB Camera')
-if preferred_dev:
-    logging.info('Using detected camera device: %s', preferred_dev)
-    cap = cv2.VideoCapture(preferred_dev)
-else:
-    logging.info('Preferred camera not found; trying indices 0..7')
-    cap = None
-    for i in range(8):
-        test = cv2.VideoCapture(i)
-        if test.isOpened():
-            logging.info('Opened camera index %d', i)
-            cap = test
-            break
-        test.release()
-
-    if cap is None:
-        # try /dev/video* nodes
-        for dev in sorted(glob.glob('/dev/video*')):
-            try:
-                cap_try = cv2.VideoCapture(dev)
-                if cap_try.isOpened():
-                    logging.info('Opened camera device %s', dev)
-                    cap = cap_try
-                    break
-                cap_try.release()
-            except Exception:
-                pass
-
-    if cap is None:
-        logging.error('No camera could be opened. Falling back to index 0 (may still fail).')
-        cap = cv2.VideoCapture(0)
-width = 1920
-height = 1080
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, width)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, height)
-
-try:
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            print("Failed to grab frame")
-            break
-
-        if not calibrated:
-            # In calibration mode, detect all reference markers.
-            full_ranges = {
-                "blue": color_ranges["blue"],
-                "green": color_ranges["green"],
-                "purple": color_ranges["purple"],
-                "yellow": color_ranges["yellow"],
-                "red": color_ranges["red"]  # You can also display red during calibration.
-            }
-            positions = detect_color_positions(frame, full_ranges)
-            # Check if all four reference markers are detected.
-            if all(marker in positions for marker in ["blue", "green", "purple", "yellow"]):
-                # Use an ordering that matches your physical layout.
-                src_points = np.float32([
-                    positions["purple"],  # top-left
-                    positions["blue"],    # top-right
-                    positions["yellow"],  # bottom-right
-                    positions["green"]    # bottom-left
-                ])
-                # Compute the transformation matrix and get the rectified image.
-                cropped_frame, transformation_matrix = perspective_transform(frame, src_points)
-                # Transform the blue and green marker positions once.
-                blue_pt = np.array([[positions["blue"]]], dtype="float32")
-                green_pt = np.array([[positions["green"]]], dtype="float32")
-                blue_cal = cv2.perspectiveTransform(blue_pt, transformation_matrix)[0][0]
-                green_cal = cv2.perspectiveTransform(green_pt, transformation_matrix)[0][0]
-                calibrated = True
-                logging.info("Calibrated.")
-                if GUI:
-                    cv2.imshow("Cropped & Rectified", cropped_frame)
-                    cv2.putText(frame, "Calibrated", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 255, 0), 3)
-                    # cv2.imshow("Frame", frame)
-            else:
-                # Optionally show the original frame while waiting for calibration.
-                if GUI:
-                    cv2.imshow("Frame", frame)
-                    cv2.putText(frame, "Calibrating...", (50, 50), cv2.FONT_HERSHEY_SIMPLEX, 2, (0, 0, 255), 3)
-        else:
-            # Calibration is done. Use the stored transformation matrix.
-            rectified_frame = cv2.warpPerspective(frame, transformation_matrix, (800, 800))
+class NodeTracker:
+    """Tracks multiple colored nodes and manages stability detection."""
+    
+    def __init__(self, colors, move_threshold=0.0001, stability_frames=20):
+        self.colors = colors
+        self.move_threshold = move_threshold
+        self.stability_frames = stability_frames
+        
+        # State for each color
+        self.stable_counts = {color: 0 for color in colors}
+        self.prev_positions = {color: None for color in colors}
+        self.last_sent_positions = {color: None for color in colors}
+    
+    def update(self, color, current_position):
+        """
+        Update tracking for a specific color node.
+        Returns True if a stable position should be sent, False otherwise.
+        """
+        if self.prev_positions[color] is not None:
+            lat_diff = abs(current_position[0] - self.prev_positions[color][0])
+            lon_diff = abs(current_position[1] - self.prev_positions[color][1])
             
-
-            # Now detect only the red marker.
-            red_positions = detect_color_positions(frame, {"red": color_ranges["red"]})
-            current_red_position = None
-            if "red" in red_positions:
-                red_pt = np.array([[red_positions["red"]]], dtype="float32")
-                red_transformed = cv2.perspectiveTransform(red_pt, transformation_matrix)[0][0]
-                # Check boundaries (0 to 800 in rectified frame).
-                if (red_transformed[0] < 0 or red_transformed[0] > 800 or 
-                    red_transformed[1] < 0 or red_transformed[1] > 800):
-                    # logging.info("Red marker is out of bounds. Not updating MQTT.")
-                    stable_count = 0
-                else:
-                    # Compute lat/lon using the stored calibration positions.
-                    red_lat, red_lon = rlpos2latlon(blue_cal, green_cal, red_transformed)
-                    current_red_position = (red_lat, red_lon)
-
-                    # Stability check.
-                    if prev_red_position is not None:
-                        if (abs(current_red_position[0] - prev_red_position[0]) < MOVE_THRESHOLD and
-                            abs(current_red_position[1] - prev_red_position[1]) < MOVE_THRESHOLD):
-                            stable_count += 1
-                        else:
-                            stable_count = 0
-                    else:
-                        stable_count = 0
-
-                    prev_red_position = current_red_position
-
-                    if stable_count >= STABILITY_FRAMES:
-                        if (last_sent_position is None or
-                            abs(current_red_position[0] - last_sent_position[0]) > MOVE_THRESHOLD or
-                            abs(current_red_position[1] - last_sent_position[1]) > MOVE_THRESHOLD):
-                            if not TEST_MODE:
-                                send_mqtt_message(red_lat, red_lon)
-                            logging.info(f"Red marker (stable): {red_lat}, {red_lon}")
-                            last_sent_position = current_red_position
-                            stable_count = 0
+            if lat_diff < self.move_threshold and lon_diff < self.move_threshold:
+                self.stable_counts[color] += 1
             else:
-                logging.info("Red marker not found.")
-                stable_count = 0
+                self.stable_counts[color] = 0
+        else:
+            self.stable_counts[color] = 0
+        
+        self.prev_positions[color] = current_position
+        
+        # Check if stable enough to send
+        if self.stable_counts[color] >= self.stability_frames:
+            if self.last_sent_positions[color] is None:
+                # First time sending
+                self.last_sent_positions[color] = current_position
+                self.stable_counts[color] = 0
+                return True
+            else:
+                # Check if position changed enough since last send
+                lat_diff = abs(current_position[0] - self.last_sent_positions[color][0])
+                lon_diff = abs(current_position[1] - self.last_sent_positions[color][1])
+                
+                if lat_diff > self.move_threshold or lon_diff > self.move_threshold:
+                    self.last_sent_positions[color] = current_position
+                    self.stable_counts[color] = 0
+                    return True
+        
+        return False
+    
+    def reset(self, color):
+        """Reset tracking state for a specific color."""
+        self.stable_counts[color] = 0
 
-            if GUI:
-                # cv2.imshow("Cropped & Rectified", rectified_frame)
-                cv2.imshow("Frame", frame)
-                if "red" in red_positions:
-                    cv2.putText(frame, f"Red: {current_red_position}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
-                elif prev_red_position is not None:
-                    cv2.putText(frame, f"Red: {prev_red_position}", (50, 100), cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 0, 255), 2)
 
-        if cv2.waitKey(1) & 0xFF == ord('q'):
-            break
+def main():
+    # Camera setup
+    preferred_dev = find_camera_device(vendor_id='32e4', product_id='3415', name_substr='HDMI USB Camera')
+    if preferred_dev:
+        logging.info('Using detected camera device: %s', preferred_dev)
+        cap = cv2.VideoCapture(preferred_dev)
+    else:
+        logging.info('Preferred camera not found; trying indices 0..7')
+        cap = None
+        for i in range(8):
+            test = cv2.VideoCapture(i)
+            if test.isOpened():
+                logging.info('Opened camera index %d', i)
+                cap = test
+                break
+            test.release()
 
-except Exception as e:
-    logging.error("An error occurred: %s", e)
-finally:
-    cap.release()
-    if GUI:
+        if cap is None:
+            for dev in sorted(glob.glob('/dev/video*')):
+                try:
+                    cap_try = cv2.VideoCapture(dev)
+                    if cap_try.isOpened():
+                        logging.info('Opened camera device %s', dev)
+                        cap = cap_try
+                        break
+                    cap_try.release()
+                except Exception:
+                    pass
+
+        if cap is None:
+            logging.error('No camera could be opened. Falling back to index 0.')
+            cap = cv2.VideoCapture(0)
+
+    # Set camera resolution
+    cap.set(cv2.CAP_PROP_FRAME_WIDTH, 1920)
+    cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 1080)
+
+    # Interactive calibration
+    calibrator = InteractiveCalibrator()
+    transformation_matrix = calibrator.calibrate(cap)
+    
+    if transformation_matrix is None:
+        logging.error("Calibration failed or cancelled")
+        cap.release()
+        return
+
+    # Initialize node tracker
+    tracker = NodeTracker(list(color_ranges.keys()), MOVE_THRESHOLD, STABILITY_FRAMES)
+
+    # Main tracking loop
+    try:
+        logging.info("Starting node tracking...")
+        # Make display windows resizable
+        cv2.namedWindow(ORIGINAL_WINDOW, cv2.WINDOW_NORMAL)
+        cv2.namedWindow(RECTIFIED_WINDOW, cv2.WINDOW_NORMAL)
+        while True:
+            ret, frame = cap.read()
+            if not ret:
+                logging.error("Failed to grab frame")
+                break
+
+            # Apply perspective transform
+            rectified_frame = cv2.warpPerspective(frame, transformation_matrix, OUTPUT_SIZE)
+            
+            # Detect all color markers
+            positions = detect_color_positions(frame, color_ranges)
+            
+            # Process each detected marker
+            for color, pixel_pos in positions.items():
+                # Transform to rectified coordinates
+                pt = np.array([[pixel_pos]], dtype="float32")
+                transformed = cv2.perspectiveTransform(pt, transformation_matrix)[0][0]
+                
+                # Check if within bounds of the rectified frame
+                rect_w, rect_h = 
+                
+                if (transformed[0] < 0 or transformed[0] > rect_w or 
+                    transformed[1] < 0 or transformed[1] > rect_h):
+                    tracker.reset(color)
+                    continue
+                
+                # Convert to lat/lon
+                lat, lon = pixel_to_latlon(transformed)
+                
+                # Update tracker and send if stable
+                should_send = tracker.update(color, (lat, lon))
+                if should_send:
+                    node_id = color_to_node_id[color]
+                    if not TEST_MODE:
+                        send_mqtt_message(node_id, lat, lon)
+                    logging.info(f"{color.upper()} node (ID {node_id}): {lat:.8f}, {lon:.8f}")
+                
+                # Visualization
+                cv2.circle(frame, pixel_pos, 10, (0, 255, 0), -1)
+                cv2.putText(frame, f"{color}", 
+                           (pixel_pos[0] - 20, pixel_pos[1] - 20),
+                           cv2.FONT_HERSHEY_SIMPLEX, 0.6, (0, 255, 0), 2)
+            
+            # Display frames (always show GUI)
+            # Scale down frames for display
+            if DISPLAY_SCALE != 1.0:
+                h_frame, w_frame = frame.shape[:2]
+                frame_display = cv2.resize(frame, (int(w_frame * DISPLAY_SCALE), int(h_frame * DISPLAY_SCALE)))
+                h_rect, w_rect = rectified_frame.shape[:2]
+                rectified_display = cv2.resize(rectified_frame, (int(w_rect * DISPLAY_SCALE), int(h_rect * DISPLAY_SCALE)))
+                cv2.imshow(ORIGINAL_WINDOW, frame_display)
+                cv2.imshow(RECTIFIED_WINDOW, rectified_display)
+            else:
+                cv2.imshow(ORIGINAL_WINDOW, frame)
+                cv2.imshow(RECTIFIED_WINDOW, rectified_frame)
+
+            # Exit on 'q'
+            if cv2.waitKey(1) & 0xFF == ord('q'):
+                break
+
+    except Exception as e:
+        logging.error("An error occurred: %s", e)
+    finally:
+        cap.release()
         cv2.destroyAllWindows()
+        if not TEST_MODE and mqtt_client:
+            mqtt_client.loop_stop()
+
+
+if __name__ == "__main__":
+    main()
